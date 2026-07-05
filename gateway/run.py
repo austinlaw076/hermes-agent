@@ -8284,15 +8284,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if fp is not None:
                 owner = claimed.get((platform, fp))
                 if owner is not None:
-                    logger.error(
-                        "Profile '%s' and '%s' both configure %s with the same "
-                        "credential — refusing to start the duplicate (a single "
-                        "bot token cannot be polled twice). Give each profile its "
-                        "own %s credential.",
-                        owner, profile_name, platform.value, platform.value,
-                    )
                     await self._safe_adapter_disconnect(adapter, platform)
-                    continue
+                    raise MultiplexConfigError(
+                        f"Profile '{profile_name}' and '{owner}' both configure {platform.value} "
+                        f"with the same credential — refusing to start (a single bot token cannot "
+                        f"be polled twice concurrently). Please assign unique credentials to each profile."
+                    )
                 claimed[(platform, fp)] = profile_name
 
             # Stamp every inbound event from this adapter with its profile so

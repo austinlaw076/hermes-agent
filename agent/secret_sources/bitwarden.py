@@ -641,18 +641,26 @@ def apply_bitwarden_secrets(
         )
         return result
 
-    try:
-        secrets, warnings = fetch_bitwarden_secrets(
-            access_token=access_token,
-            project_id=project_id,
-            binary=binary,
-            cache_ttl_seconds=cache_ttl_seconds,
-            server_url=server_url,
-            home_path=home_path,
-        )
-    except RuntimeError as exc:
-        result.error = str(exc)
-        return result
+    import time
+    max_retries = 3
+    retry_delay = 1.0
+    for attempt in range(max_retries):
+        try:
+            secrets, warnings = fetch_bitwarden_secrets(
+                access_token=access_token,
+                project_id=project_id,
+                binary=binary,
+                cache_ttl_seconds=cache_ttl_seconds,
+                server_url=server_url,
+                home_path=home_path,
+            )
+            break
+        except RuntimeError as exc:
+            if attempt == max_retries - 1:
+                result.error = str(exc)
+                return result
+            time.sleep(retry_delay)
+            retry_delay *= 2
 
     result.secrets = secrets
     result.warnings.extend(warnings)
