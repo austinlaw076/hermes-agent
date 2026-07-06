@@ -169,11 +169,11 @@ class TestMultiplexEnvOverrides:
 
         # Set process-global env var (primary token)
         monkeypatch.setenv("DISCORD_BOT_TOKEN", "primary-discord-token")
-        
+
         # Prepare profile folders representing secondary profile
         profile_home = tmp_path / "profiles" / "secondary_profile"
         profile_home.mkdir(parents=True, exist_ok=True)
-        
+
         # Write .env file for the secondary profile with a different token
         dotenv_content = "DISCORD_BOT_TOKEN=secondary-discord-token\n"
         (profile_home / ".env").write_text(dotenv_content, encoding="utf-8")
@@ -199,7 +199,7 @@ class TestMultiplexEnvOverrides:
         # Prepare a temporary folder representing secondary profile
         profile_home = tmp_path / "profiles" / "secondary_profile"
         profile_home.mkdir(parents=True, exist_ok=True)
-        
+
         # Write config.yaml enabling feishu and sms
         config_content = """
 gateway:
@@ -226,5 +226,3 @@ platforms:
         assert config.platforms[Platform.SMS].enabled is False
         # telegram (non-port-binding) should remain enabled
         assert config.platforms[Platform.TELEGRAM].enabled is True
-
-

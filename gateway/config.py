@@ -1241,7 +1241,7 @@ def load_gateway_config() -> GatewayConfig:
     active_home = _hermes_constants_local.get_hermes_home().resolve()
     is_secondary_override = active_home != primary_home
     from agent.secret_scope import is_multiplex_active
-    if is_secondary_override:
+    if is_secondary_override and is_multiplex_active():
         _PORT_BINDING_PLATFORMS = {
             "webhook",
             "api_server",
@@ -1355,7 +1355,14 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             if is_secondary:
                 # Secondary profile: resolve via secret scope, fall back to
                 # default (not os.environ) for profile-only env names.
-                val = _get_secret(name)
+                try:
+                    val = _get_secret(name)
+                except Exception:
+                    logger.warning(
+                        "Unexpected error resolving secret %r via secret scope; "
+                        "falling back to os.environ.", name, exc_info=True,
+                    )
+                    return _orig_getenv(name, default)
                 if val is not None:
                     return val
                 if not _is_global_env(name):
