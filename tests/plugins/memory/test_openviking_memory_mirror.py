@@ -187,6 +187,50 @@ def test_rapid_add_replace_remove_is_processed_in_fifo_order(tmp_path):
     provider.shutdown()
 
 
+def test_unmapped_replace_fails_closed_with_warning(tmp_path, caplog):
+    client = _FakeVikingClient()
+    provider = _provider(tmp_path, client)
+
+    with caplog.at_level("WARNING", logger="plugins.memory.openviking"):
+        provider.on_memory_write(
+            "replace",
+            "user",
+            "Employment status is employed",
+            metadata={"old_text": "job seeking"},
+        )
+        provider.shutdown()
+
+    assert client.snapshot() == []
+    assert any(
+        "no stable OpenViking URI mapping" in record.message
+        for record in caplog.records
+    )
+
+
+def test_ambiguous_replace_fails_closed_without_guessing(tmp_path, caplog):
+    client = _FakeVikingClient()
+    provider = _provider(tmp_path, client)
+
+    provider.on_memory_write("add", "user", "Device owned: Tablet A")
+    provider.on_memory_write("add", "user", "Device owned: Tablet B")
+    _wait_for(lambda: len(client.snapshot()) == 2)
+
+    with caplog.at_level("WARNING", logger="plugins.memory.openviking"):
+        provider.on_memory_write(
+            "replace",
+            "user",
+            "Device owned: Tablet C",
+            metadata={"old_text": "Tablet"},
+        )
+        provider.shutdown()
+
+    assert len(client.snapshot()) == 2
+    assert any(
+        "matched 2 OpenViking URI mappings" in record.message
+        for record in caplog.records
+    )
+
+
 def test_final_mirror_failure_is_visible_at_warning_level(tmp_path, caplog):
     client = _FakeVikingClient(fail_post=True)
     provider = _provider(tmp_path, client)
