@@ -26,46 +26,6 @@ jobs:
           path = Path('plugins/memory/openviking/__init__.py')
           text = path.read_text(encoding='utf-8')
 
-          old_memory_write = '''    def on_memory_write(
-              self,
-              action: str,
-              target: str,
-              content: str,
-              metadata: Optional[Dict[str, Any]] = None,
-          ) -> None:
-              """Mirror successful built-in memory additions to OpenViking."""
-              if action != "add" or not content or not self._ensure_client():
-                  return
-
-              subdir = _MEMORY_WRITE_TARGET_SUBDIR_MAP.get(target, _DEFAULT_MEMORY_SUBDIR)
-              uri = self._build_memory_uri(subdir)
-
-              def _write():
-                  try:
-                      client = self._new_client()
-                      client.post("/api/v1/content/write", {
-                          "uri": uri,
-                          "content": content,
-                          "mode": "create",
-                      })
-                  except Exception as e:
-                      logger.debug("OpenViking memory mirror failed: %s", e)
-                  finally:
-                      with self._memory_write_lock:
-                          self._memory_write_threads.discard(threading.current_thread())
-
-              t = threading.Thread(target=_write, daemon=True, name="openviking-memwrite")
-              with self._memory_write_lock:
-                  if self._shutting_down:
-                      return
-                  self._memory_write_threads.add(t)
-                  try:
-                      t.start()
-                  except Exception as e:
-                      self._memory_write_threads.discard(t)
-                      logger.debug("OpenViking memory mirror worker failed to start: %s", e)
-          '''
-
           new_memory_write = '''    def on_memory_write(
               self,
               action: str,
@@ -92,36 +52,35 @@ jobs:
                   metadata=metadata,
                   subdir=subdir,
               )
-          '''
 
-          old_shutdown = '''    def shutdown(self) -> None:
-              # Stop deferred finalizers from issuing new commits against a
-              # torn-down client, then drain everything still in flight.
-              self._shutting_down = True
-              # Wait for every in-flight writer across all tracked sessions.
-          '''
-
-          new_shutdown = '''    def shutdown(self) -> None:
-              # Stop deferred finalizers from issuing new commits against a
-              # torn-down client, then drain everything still in flight.
-              self._shutting_down = True
-              from plugins.memory.openviking.native_memory_mirror import (
-                  shutdown_native_memory_mirror,
-              )
-
-              shutdown_native_memory_mirror(self, timeout=5.0)
-              # Wait for every in-flight writer across all tracked sessions.
-          '''
+'''
 
           if 'enqueue_native_memory_write(' not in text:
-              if text.count(old_memory_write) != 1:
-                  raise SystemExit('expected on_memory_write block not found exactly once')
-              text = text.replace(old_memory_write, new_memory_write)
+              start_marker = '    def on_memory_write(\n'
+              end_marker = '    def get_tool_schemas('
+              start = text.find(start_marker)
+              end = text.find(end_marker, start + len(start_marker))
+              if start < 0 or end < 0:
+                  raise SystemExit('could not locate on_memory_write method boundaries')
+              text = text[:start] + new_memory_write + text[end:]
 
           if 'shutdown_native_memory_mirror(self, timeout=5.0)' not in text:
-              if text.count(old_shutdown) != 1:
-                  raise SystemExit('expected shutdown block not found exactly once')
-              text = text.replace(old_shutdown, new_shutdown)
+              shutdown_marker = '    def shutdown(self) -> None:\n'
+              shutdown_start = text.find(shutdown_marker)
+              if shutdown_start < 0:
+                  raise SystemExit('could not locate shutdown method')
+              assignment = '        self._shutting_down = True\n'
+              assignment_pos = text.find(assignment, shutdown_start)
+              if assignment_pos < 0:
+                  raise SystemExit('could not locate shutdown state assignment')
+              insert_at = assignment_pos + len(assignment)
+              addition = '''        from plugins.memory.openviking.native_memory_mirror import (
+              shutdown_native_memory_mirror,
+          )
+
+          shutdown_native_memory_mirror(self, timeout=5.0)
+'''
+              text = text[:insert_at] + addition + text[insert_at:]
 
           path.write_text(text, encoding='utf-8')
           PY
