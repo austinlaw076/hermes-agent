@@ -89,12 +89,14 @@ def test_replace_updates_the_same_openviking_uri_and_registry(tmp_path):
 
     registry = json.loads(_registry_path(tmp_path).read_text(encoding="utf-8"))
     assert registry == {
-        "version": 1,
+        "version": 2,
         "entries": [
             {
                 "target": "user",
                 "uri": uri,
                 "content": "Preferred provider is OpenRouter",
+                "state": "active",
+                "pending_event_id": "",
             }
         ],
     }
@@ -122,7 +124,7 @@ def test_remove_deletes_exact_mapped_uri_and_registry_entry(tmp_path):
     assert delete[3]["params"] == {"uri": uri, "recursive": False, "wait": True}
 
     registry = json.loads(_registry_path(tmp_path).read_text(encoding="utf-8"))
-    assert registry == {"version": 1, "entries": []}
+    assert registry == {"version": 2, "entries": []}
     provider.shutdown()
 
 
@@ -186,7 +188,7 @@ def test_rapid_add_replace_remove_is_processed_in_fifo_order(tmp_path):
     assert calls[2][3]["params"] == {"uri": uri, "recursive": False, "wait": True}
 
     registry = json.loads(_registry_path(tmp_path).read_text(encoding="utf-8"))
-    assert registry == {"version": 1, "entries": []}
+    assert registry == {"version": 2, "entries": []}
     provider.shutdown()
 
 
@@ -234,7 +236,7 @@ def test_ambiguous_replace_fails_closed_without_guessing(tmp_path, caplog):
     )
 
 
-def test_final_mirror_failure_is_visible_at_warning_level(tmp_path, caplog):
+def test_final_mirror_failure_is_visible_and_intent_remains_pending(tmp_path, caplog):
     client = _FakeVikingClient(fail_post=True)
     provider = _provider(tmp_path, client)
 
@@ -243,10 +245,17 @@ def test_final_mirror_failure_is_visible_at_warning_level(tmp_path, caplog):
         _wait_for(lambda: len(client.snapshot()) == 1)
         _wait_for(
             lambda: any(
-                record.levelname == "WARNING" and "OpenViking memory mirror failed" in record.message
+                record.levelname == "WARNING" and "OpenViking memory mirror delivery failed" in record.message
                 for record in caplog.records
             )
         )
 
-    assert not _registry_path(tmp_path).exists()
+    registry = json.loads(_registry_path(tmp_path).read_text(encoding="utf-8"))
+    assert registry["version"] == 2
+    assert len(registry["entries"]) == 1
+    entry = registry["entries"][0]
+    assert entry["target"] == "user"
+    assert entry["content"] == "Visible failure"
+    assert entry["state"] == "pending_create"
+    assert entry["pending_event_id"]
     provider.shutdown()

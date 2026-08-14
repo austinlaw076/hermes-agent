@@ -2776,6 +2776,15 @@ class OpenVikingMemoryProvider(MemoryProvider):
             )
             self._recover_pending_sessions()
 
+        # Durable native-memory replay is independent of backend availability.
+        # Recovery reconstructs exact pending intent before any later memory
+        # write and the worker retries delivery when OpenViking reconnects.
+        from plugins.memory.openviking.native_memory_mirror import (
+            start_native_memory_mirror,
+        )
+
+        start_native_memory_mirror(self)
+
         # Register as the last active provider for atexit safety net
         global _last_active_provider
         _last_active_provider = self
@@ -4764,7 +4773,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Mirror successful built-in memory mutations to OpenViking."""
-        if action not in {"add", "replace", "remove"} or not self._ensure_client():
+        if action not in {"add", "replace", "remove"}:
             return
         if action in {"add", "replace"} and not content:
             return
