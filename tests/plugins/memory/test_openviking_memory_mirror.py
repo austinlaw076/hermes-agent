@@ -1,3 +1,5 @@
+# Regression coverage for hermes-agent#31000.
+
 import json
 import threading
 import time
