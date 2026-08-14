@@ -99,25 +99,64 @@ canonical user-scoped form such as
 `viking://user/default/peers/${OPENVIKING_AGENT}/memories/...` in API-key mode.
 Explicit remembers do not depend on session commit extraction.
 
-Successful Hermes built-in `memory` mutations are mirrored to OpenViking in
-FIFO order. Hermes persists the exact OpenViking URI for each native memory
-entry in the active profile at
-`$HERMES_HOME/openviking/memory_mirror_registry.json`, so later mutations never
-need to guess a target by semantic similarity:
+Successful Hermes built-in `memory` mutations are mirrored through a durable,
+profile-scoped outbox. Two private local files under `$HERMES_HOME/openviking/`
+track the bridge:
 
-| Hermes action | OpenViking operation |
-|---------------|----------------------|
-| `add` | `content/write` with `mode=create`; store the exact returned URI in the mirror registry |
-| `replace` | resolve one registry entry from `target` + `old_text`, then replace the same URI and wait for semantic/vector refresh |
-| `remove` | resolve one registry entry from `target` + `old_text`, then delete that exact URI and wait for semantic cleanup |
+```text
+memory_mirror_registry.json   # latest intended stable URI/state
+memory_mirror_outbox.jsonl    # append-only event + acknowledgement journal
+```
 
-The mirror registry owns only memories created through this built-in-memory
-bridge. Session-extracted memories and explicit `viking_remember` writes are not
-registered or modified by it. Existing OpenViking memories created before the
-registry was introduced also have no safe automatic mapping: a later built-in
-`replace` or `remove` for such an entry fails closed with a warning and leaves
-OpenViking unchanged rather than guessing which memory to mutate. Use
+Each event and acknowledgement is flushed and `fsync()`ed before the append
+returns. The registry uses intended-state lifecycle values (`pending_create`,
+`active`, `pending_replace`, `pending_delete`) so a later local mutation can
+resolve the same stable URI even while an earlier remote operation is still
+pending.
+
+| Hermes action | Durable / OpenViking behavior |
+|---------------|-------------------------------|
+| `add` | journal an event first, derive `mem_evt_<event_id>.md`, record `pending_create`, then `content/write` with `mode=create` |
+| `replace` | resolve exactly one registry URI before journaling, record full before/after content, then replace that same URI with `wait=true` |
+| `remove` | resolve exactly one registry URI before journaling, record the exact URI, then delete it with `wait=true` |
+
+The event URI is final once journaled. Replay never uses semantic similarity or
+`old_text` to rediscover a target. If a replayed create encounters its exact URI
+already present, Hermes reads that same URI only: identical content is treated
+as already applied, while different content is a deterministic conflict that
+stops ordered replay rather than guessing.
+
+OpenViking availability no longer gates durable journaling. If the backend is
+down, the event remains unacknowledged and the FIFO worker retries it with a
+bounded exponential delay. Provider startup scans the outbox automatically,
+reconstructs the latest intended registry state from exact unacknowledged
+events, and replays them in original journal order even if no new memory write
+occurs after restart. An acknowledgement is appended only after the remote
+operation is applied/verified and the corresponding registry transition is
+written.
+
+The mirror registry/outbox owns only memories created through this built-in
+memory bridge. Session-extracted memories and explicit `viking_remember` writes
+are not registered or modified by it. Existing OpenViking memories created
+before the registry was introduced also have no safe automatic mapping: a later
+built-in `replace` or `remove` for such an entry fails closed with a warning and
+leaves OpenViking unchanged rather than guessing which memory to mutate. Use
 `viking_forget` with an exact URI for manual cleanup of those entries.
+
+### Durability boundaries
+
+Once an outbox event append has returned successfully, that exact mutation
+intent survives a process restart and can be retried idempotently. This bridge
+is deliberately not a distributed transaction with Hermes' native memory
+files, however: Hermes calls the provider hook after the `MEMORY.md` / `USER.md`
+mutation succeeds, so a crash in the narrow interval before the outbox event is
+fsynced can still leave a native entry without a mirror event. Reconciliation
+and legacy backfill are separate follow-up work.
+
+The current FIFO and registry serialization guarantee applies within one Hermes
+provider process. Cross-process locking/serialization and journal compaction are
+also separate follow-up concerns; this implementation keeps the JSONL journal
+append-only for auditability.
 
 `viking_forget` is intentionally narrow. It only accepts concrete user memory
 file URIs, such as
