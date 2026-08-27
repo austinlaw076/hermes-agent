@@ -1,0 +1,264 @@
+name: PR 85860 Rebase Repair
+
+on:
+  push:
+    branches:
+      - automation/pr85860-rebase-run
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pr85860-rebase-repair
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repair branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # 8.2.0
+        with:
+          version: "0.9.28"
+          enable-cache: true
+
+      - name: Rebuild PR on current upstream main
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TARGET_BRANCH='fix/openviking-stable-memory-mirror'
+          BACKUP_BRANCH='backup/pr85860-pre-rebase-fb001282'
+          EXPECTED_OLD='fb0012824ad1654f7485133d59482c2993896e2d'
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          remote_head="$(git ls-remote origin "refs/heads/${TARGET_BRANCH}" | awk '{print $1}')"
+          if [[ "$remote_head" != "$EXPECTED_OLD" ]]; then
+            echo "Target branch moved: expected $EXPECTED_OLD, got $remote_head" >&2
+            exit 1
+          fi
+
+          git fetch origin "refs/heads/${BACKUP_BRANCH}:refs/remotes/origin/${BACKUP_BRANCH}"
+          git remote add upstream https://github.com/NousResearch/hermes-agent.git
+          git fetch --no-tags upstream main
+          UPSTREAM_HEAD="$(git rev-parse FETCH_HEAD)"
+          echo "Rebasing feature onto upstream $UPSTREAM_HEAD"
+
+          git checkout --detach "$UPSTREAM_HEAD"
+
+          git show "origin/${BACKUP_BRANCH}:plugins/memory/openviking/native_memory_mirror.py" \
+            > plugins/memory/openviking/native_memory_mirror.py
+          git show "origin/${BACKUP_BRANCH}:tests/plugins/memory/test_openviking_memory_mirror.py" \
+            > tests/plugins/memory/test_openviking_memory_mirror.py
+
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          init_path = Path('plugins/memory/openviking/__init__.py')
+          text = init_path.read_text(encoding='utf-8')
+
+          replacement = '''    def on_memory_write(
+              self,
+              action: str,
+              target: str,
+              content: str,
+              metadata: Optional[Dict[str, Any]] = None,
+          ) -> None:
+              """Mirror successful built-in memory mutations to OpenViking."""
+              if action not in {"add", "replace", "remove"} or not self._ensure_client():
+                  return
+              if action in {"add", "replace"} and not content:
+                  return
+
+              subdir = _MEMORY_WRITE_TARGET_SUBDIR_MAP.get(target, _DEFAULT_MEMORY_SUBDIR)
+              try:
+                  # Keep identity resolution, URI construction, and the write on one
+                  # connection snapshot even if the active profile reloads.
+                  client = self._new_client()
+              except Exception as e:
+                  logger.debug("OpenViking memory mirror client creation failed: %s", e)
+                  return
+
+              from plugins.memory.openviking.native_memory_mirror import (
+                  enqueue_native_memory_write,
+              )
+
+              enqueue_native_memory_write(
+                  self,
+                  action,
+                  target,
+                  content,
+                  metadata=metadata,
+                  subdir=subdir,
+                  client=client,
+              )
+
+          def get_tool_schemas'''
+
+          pattern = re.compile(
+              r'^    def on_memory_write\(\n.*?^    def get_tool_schemas',
+              re.MULTILINE | re.DOTALL,
+          )
+          text, count = pattern.subn(replacement, text, count=1)
+          if count != 1:
+              raise SystemExit(f'expected one on_memory_write block, replaced {count}')
+
+          shutdown_anchor = '''        self._shutting_down = True\n        # Wait for every in-flight writer across all tracked sessions.\n'''
+          shutdown_replacement = '''        self._shutting_down = True
+              from plugins.memory.openviking.native_memory_mirror import (
+                  shutdown_native_memory_mirror,
+              )
+
+              shutdown_native_memory_mirror(self, timeout=5.0)
+              # Wait for every in-flight writer across all tracked sessions.
+          '''
+          if text.count(shutdown_anchor) != 1:
+              raise SystemExit('shutdown anchor changed upstream')
+          text = text.replace(shutdown_anchor, shutdown_replacement, 1)
+          init_path.write_text(text, encoding='utf-8')
+
+          mirror_path = Path('plugins/memory/openviking/native_memory_mirror.py')
+          mirror = mirror_path.read_text(encoding='utf-8')
+
+          mirror = mirror.replace(
+              '''        metadata: Optional[Dict[str, Any]] = None,\n        subdir: str,\n    ) -> None:\n''',
+              '''        metadata: Optional[Dict[str, Any]] = None,\n        subdir: str,\n        client: Any,\n    ) -> None:\n''',
+              1,
+          )
+          mirror = mirror.replace(
+              '''            "subdir": str(subdir),\n        }\n''',
+              '''            "subdir": str(subdir),\n            "client": client,\n        }\n''',
+              1,
+          )
+          mirror = mirror.replace(
+              '''        registry = self._load_registry()\n        client = self._provider._new_client()\n''',
+              '''        registry = self._load_registry()\n        client = event["client"]\n''',
+              1,
+          )
+          mirror = mirror.replace(
+              '''            requested_uri = self._provider._build_memory_uri(event["subdir"])\n''',
+              '''            requested_uri = self._provider._build_memory_uri(\n                event["subdir"], client=client, timeout=0.05\n            )\n''',
+              1,
+          )
+          mirror = mirror.replace(
+              '''    metadata: Optional[Dict[str, Any]] = None,\n    subdir: str,\n) -> None:\n''',
+              '''    metadata: Optional[Dict[str, Any]] = None,\n    subdir: str,\n    client: Any,\n) -> None:\n''',
+              1,
+          )
+          mirror = mirror.replace(
+              '''        metadata=metadata,\n        subdir=subdir,\n    )\n''',
+              '''        metadata=metadata,\n        subdir=subdir,\n        client=client,\n    )\n''',
+              1,
+          )
+
+          required = [
+              'client = event["client"]',
+              'client=client, timeout=0.05',
+              'client: Any,',
+          ]
+          if not all(item in mirror for item in required):
+              raise SystemExit('native mirror adaptation did not apply cleanly')
+          mirror_path.write_text(mirror, encoding='utf-8')
+
+          test_path = Path('tests/plugins/memory/test_openviking_memory_mirror.py')
+          tests = test_path.read_text(encoding='utf-8')
+          get_method = '''    def get(self, path, params=None, **kwargs):
+              if path == "/api/v1/system/status":
+                  return {"status": "ok", "result": {"user": "default"}}
+              return {"status": "ok", "result": {}}
+
+          '''
+          marker = '    def delete(self, path, **kwargs):\n'
+          if tests.count(marker) != 1:
+              raise SystemExit('fake client delete marker changed')
+          tests = tests.replace(marker, get_method + marker, 1)
+          test_path.write_text(tests, encoding='utf-8')
+
+          readme_path = Path('plugins/memory/openviking/README.md')
+          readme = readme_path.read_text(encoding='utf-8')
+          start = readme.index('Hermes built-in `memory` tool additions are mirrored to OpenViking after the\n')
+          end = readme.index('`viking_forget` is intentionally narrow.', start)
+          merged_docs = '''Successful Hermes built-in `memory` mutations are mirrored to OpenViking in
+          FIFO order. Hermes persists the exact OpenViking URI for each native memory
+          entry in the active profile at
+          `$HERMES_HOME/openviking/memory_mirror_registry.json`, so later mutations never
+          need to guess a target by semantic similarity:
+
+          | Hermes action | OpenViking operation |
+          |---------------|----------------------|
+          | `add` | `content/write` with `mode=create`; store the exact returned URI in the mirror registry |
+          | `replace` | resolve one registry entry from `target` + `old_text`, then replace the same URI and wait for semantic/vector refresh |
+          | `remove` | resolve one registry entry from `target` + `old_text`, then delete that exact URI and wait for semantic cleanup |
+
+          URI construction uses the same server-asserted explicit user identity and client
+          snapshot as the current OpenViking provider, so registry entries keep the canonical
+          `viking://user/<user>/peers/...` identity used by current servers.
+
+          The mirror registry owns only memories created through this built-in-memory
+          bridge. Session-extracted memories and explicit `viking_remember` writes are not
+          registered or modified by it. Existing OpenViking memories created before the
+          registry was introduced also have no safe automatic mapping: a later built-in
+          `replace` or `remove` for such an entry fails closed with a warning and leaves
+          OpenViking unchanged rather than guessing which memory to mutate. Use
+          `viking_forget` with an exact URI for manual cleanup of those entries.
+
+          `replace` and `remove` resolve the same `old_text` supplied by the native memory
+          tool against the registry's pre-mutation content. If that text no longer maps
+          to exactly one registry entry, the OpenViking mutation fails closed rather than
+          selecting a URI heuristically.
+
+          The mirror is asynchronous and intentionally not a distributed transaction.
+          The local Hermes memory mutation commits before the OpenViking request. If that
+          remote request then fails (for example because of a transient network error),
+          the failure is logged at WARNING and this PR does not durably replay the event;
+          Hermes and OpenViking can therefore drift until the entry is repaired manually
+          or later reconciliation/durable-outbox work handles it.
+
+          Registry writes request file mode `0600` on POSIX systems. That mode is not an
+          equivalent Windows ACL guarantee, so Windows deployments should rely on the
+          normal account/filesystem access controls protecting `HERMES_HOME`.
+
+          '''
+          # Strip script indentation from the Markdown replacement.
+          merged_docs = '\n'.join(line[10:] if line.startswith('          ') else line for line in merged_docs.splitlines()) + '\n'
+          readme = readme[:start] + merged_docs + readme[end:]
+          readme_path.write_text(readme, encoding='utf-8')
+          PY
+
+          python -m py_compile \
+            plugins/memory/openviking/__init__.py \
+            plugins/memory/openviking/native_memory_mirror.py \
+            tests/plugins/memory/test_openviking_memory_mirror.py
+          git diff --check
+
+          uv sync --locked --all-extras --dev
+          uv run pytest -q \
+            tests/plugins/memory/test_openviking_memory_mirror.py \
+            tests/plugins/memory/test_openviking_provider.py
+          uv run ruff check \
+            plugins/memory/openviking/__init__.py \
+            plugins/memory/openviking/native_memory_mirror.py \
+            tests/plugins/memory/test_openviking_memory_mirror.py
+
+          git add \
+            plugins/memory/openviking/README.md \
+            plugins/memory/openviking/__init__.py \
+            plugins/memory/openviking/native_memory_mirror.py \
+            tests/plugins/memory/test_openviking_memory_mirror.py
+          git commit -m 'fix(openviking): rebase stable mirror onto current main'
+
+          NEW_HEAD="$(git rev-parse HEAD)"
+          echo "Validated rebased head: $NEW_HEAD"
+          git push \
+            --force-with-lease="refs/heads/${TARGET_BRANCH}:${EXPECTED_OLD}" \
+            origin "HEAD:refs/heads/${TARGET_BRANCH}"
