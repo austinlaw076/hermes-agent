@@ -63,11 +63,13 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           import re
+          import textwrap
 
           init_path = Path('plugins/memory/openviking/__init__.py')
           text = init_path.read_text(encoding='utf-8')
 
-          replacement = '''    def on_memory_write(
+          replacement = textwrap.indent(textwrap.dedent('''\
+          def on_memory_write(
               self,
               action: str,
               target: str,
@@ -103,7 +105,7 @@ jobs:
                   client=client,
               )
 
-          def get_tool_schemas'''
+          def get_tool_schemas'''), '    ')
 
           pattern = re.compile(
               r'^    def on_memory_write\(\n.*?^    def get_tool_schemas',
@@ -113,15 +115,16 @@ jobs:
           if count != 1:
               raise SystemExit(f'expected one on_memory_write block, replaced {count}')
 
-          shutdown_anchor = '''        self._shutting_down = True\n        # Wait for every in-flight writer across all tracked sessions.\n'''
-          shutdown_replacement = '''        self._shutting_down = True
-              from plugins.memory.openviking.native_memory_mirror import (
-                  shutdown_native_memory_mirror,
-              )
+          shutdown_anchor = '        self._shutting_down = True\n        # Wait for every in-flight writer across all tracked sessions.\n'
+          shutdown_replacement = textwrap.indent(textwrap.dedent('''\
+          self._shutting_down = True
+          from plugins.memory.openviking.native_memory_mirror import (
+              shutdown_native_memory_mirror,
+          )
 
-              shutdown_native_memory_mirror(self, timeout=5.0)
-              # Wait for every in-flight writer across all tracked sessions.
-          '''
+          shutdown_native_memory_mirror(self, timeout=5.0)
+          # Wait for every in-flight writer across all tracked sessions.
+          '''), '        ')
           if text.count(shutdown_anchor) != 1:
               raise SystemExit('shutdown anchor changed upstream')
           text = text.replace(shutdown_anchor, shutdown_replacement, 1)
@@ -130,36 +133,36 @@ jobs:
           mirror_path = Path('plugins/memory/openviking/native_memory_mirror.py')
           mirror = mirror_path.read_text(encoding='utf-8')
 
-          mirror = mirror.replace(
-              '''        metadata: Optional[Dict[str, Any]] = None,\n        subdir: str,\n    ) -> None:\n''',
-              '''        metadata: Optional[Dict[str, Any]] = None,\n        subdir: str,\n        client: Any,\n    ) -> None:\n''',
-              1,
-          )
-          mirror = mirror.replace(
-              '''            "subdir": str(subdir),\n        }\n''',
-              '''            "subdir": str(subdir),\n            "client": client,\n        }\n''',
-              1,
-          )
-          mirror = mirror.replace(
-              '''        registry = self._load_registry()\n        client = self._provider._new_client()\n''',
-              '''        registry = self._load_registry()\n        client = event["client"]\n''',
-              1,
-          )
-          mirror = mirror.replace(
-              '''            requested_uri = self._provider._build_memory_uri(event["subdir"])\n''',
-              '''            requested_uri = self._provider._build_memory_uri(\n                event["subdir"], client=client, timeout=0.05\n            )\n''',
-              1,
-          )
-          mirror = mirror.replace(
-              '''    metadata: Optional[Dict[str, Any]] = None,\n    subdir: str,\n) -> None:\n''',
-              '''    metadata: Optional[Dict[str, Any]] = None,\n    subdir: str,\n    client: Any,\n) -> None:\n''',
-              1,
-          )
-          mirror = mirror.replace(
-              '''        metadata=metadata,\n        subdir=subdir,\n    )\n''',
-              '''        metadata=metadata,\n        subdir=subdir,\n        client=client,\n    )\n''',
-              1,
-          )
+          replacements = [
+              (
+                  '        metadata: Optional[Dict[str, Any]] = None,\n        subdir: str,\n    ) -> None:\n',
+                  '        metadata: Optional[Dict[str, Any]] = None,\n        subdir: str,\n        client: Any,\n    ) -> None:\n',
+              ),
+              (
+                  '            "subdir": str(subdir),\n        }\n',
+                  '            "subdir": str(subdir),\n            "client": client,\n        }\n',
+              ),
+              (
+                  '        registry = self._load_registry()\n        client = self._provider._new_client()\n',
+                  '        registry = self._load_registry()\n        client = event["client"]\n',
+              ),
+              (
+                  '            requested_uri = self._provider._build_memory_uri(event["subdir"])\n',
+                  '            requested_uri = self._provider._build_memory_uri(\n                event["subdir"], client=client, timeout=0.05\n            )\n',
+              ),
+              (
+                  '    metadata: Optional[Dict[str, Any]] = None,\n    subdir: str,\n) -> None:\n',
+                  '    metadata: Optional[Dict[str, Any]] = None,\n    subdir: str,\n    client: Any,\n) -> None:\n',
+              ),
+              (
+                  '        metadata=metadata,\n        subdir=subdir,\n    )\n',
+                  '        metadata=metadata,\n        subdir=subdir,\n        client=client,\n    )\n',
+              ),
+          ]
+          for old, new in replacements:
+              if mirror.count(old) != 1:
+                  raise SystemExit(f'native mirror adaptation anchor count={mirror.count(old)}: {old!r}')
+              mirror = mirror.replace(old, new, 1)
 
           required = [
               'client = event["client"]',
@@ -172,12 +175,13 @@ jobs:
 
           test_path = Path('tests/plugins/memory/test_openviking_memory_mirror.py')
           tests = test_path.read_text(encoding='utf-8')
-          get_method = '''    def get(self, path, params=None, **kwargs):
+          get_method = textwrap.indent(textwrap.dedent('''\
+          def get(self, path, params=None, **kwargs):
               if path == "/api/v1/system/status":
                   return {"status": "ok", "result": {"user": "default"}}
               return {"status": "ok", "result": {}}
 
-          '''
+          '''), '    ')
           marker = '    def delete(self, path, **kwargs):\n'
           if tests.count(marker) != 1:
               raise SystemExit('fake client delete marker changed')
@@ -186,9 +190,13 @@ jobs:
 
           readme_path = Path('plugins/memory/openviking/README.md')
           readme = readme_path.read_text(encoding='utf-8')
-          start = readme.index('Hermes built-in `memory` tool additions are mirrored to OpenViking after the\n')
+          start_marker = 'Hermes built-in `memory` tool additions are mirrored to OpenViking after the\n'
+          if start_marker not in readme:
+              raise SystemExit('README memory-write section changed upstream')
+          start = readme.index(start_marker)
           end = readme.index('`viking_forget` is intentionally narrow.', start)
-          merged_docs = '''Successful Hermes built-in `memory` mutations are mirrored to OpenViking in
+          merged_docs = textwrap.dedent('''\
+          Successful Hermes built-in `memory` mutations are mirrored to OpenViking in
           FIFO order. Hermes persists the exact OpenViking URI for each native memory
           entry in the active profile at
           `$HERMES_HOME/openviking/memory_mirror_registry.json`, so later mutations never
@@ -228,9 +236,7 @@ jobs:
           equivalent Windows ACL guarantee, so Windows deployments should rely on the
           normal account/filesystem access controls protecting `HERMES_HOME`.
 
-          '''
-          # Strip script indentation from the Markdown replacement.
-          merged_docs = '\n'.join(line[10:] if line.startswith('          ') else line for line in merged_docs.splitlines()) + '\n'
+          ''')
           readme = readme[:start] + merged_docs + readme[end:]
           readme_path.write_text(readme, encoding='utf-8')
           PY
