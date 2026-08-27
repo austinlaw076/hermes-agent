@@ -119,6 +119,22 @@ registry was introduced also have no safe automatic mapping: a later built-in
 OpenViking unchanged rather than guessing which memory to mutate. Use
 `viking_forget` with an exact URI for manual cleanup of those entries.
 
+`replace` and `remove` resolve the same `old_text` supplied by the native memory
+tool against the registry's pre-mutation content. If that text no longer maps
+to exactly one registry entry, the OpenViking mutation fails closed rather than
+selecting a URI heuristically.
+
+The mirror is asynchronous and intentionally not a distributed transaction.
+The local Hermes memory mutation commits before the OpenViking request. If that
+remote request then fails (for example because of a transient network error),
+the failure is logged at WARNING and this PR does not durably replay the event;
+Hermes and OpenViking can therefore drift until the entry is repaired manually
+or later reconciliation/durable-outbox work handles it.
+
+Registry writes request file mode `0600` on POSIX systems. That mode is not an
+equivalent Windows ACL guarantee, so Windows deployments should rely on the
+normal account/filesystem access controls protecting `HERMES_HOME`.
+
 `viking_forget` is intentionally narrow. It only accepts concrete user memory
 file URIs, such as
 `viking://user/peers/hermes/memories/preferences/mem_abc123.md` or the canonical
